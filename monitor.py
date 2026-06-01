@@ -51,15 +51,24 @@ def init_db():
     logging.info("Database initialized successfully.")
 
 # ==============================================================================
-# 3. UTILITIES & GUEST HEADERS
+# 3. UTILITIES & DYNAMIC HEADERS
 # ==============================================================================
-def get_guest_headers():
-    return {
+def get_guest_headers(session):
+    """Generates standard headers matching the active session's cookie state."""
+    headers = {
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": f"{BASE_URL}/shop/{SHOP_ID}",
-        "X-Requested-With": "XMLHttpRequest"
+        "X-Requested-With": "XMLHttpRequest",
+        "X-API-Source": "pc"
     }
+    
+    # 🔑 CRITICAL FIX: Dynamically extract the live token dropped by the landing page warm-up
+    csrf_token = session.cookies.get("csrftoken")
+    if csrf_token:
+        headers["X-CSRFToken"] = csrf_token
+        
+    return headers
 
 def format_price(raw_price: int) -> str:
     return f"₱{raw_price / 100000:,.2f}"
@@ -128,13 +137,11 @@ def process_product(cursor, item_id: int, name: str, price: int, stock: int):
         )
 
 # ==============================================================================
-# 5. CORE MONITOR CYCLE (WITH AUTOMATED SESSION WARMING)
+# 5. CORE MONITOR CYCLE
 # ==============================================================================
 def monitor_store_cycle(session):
     logging.info(f"Starting store scraping cycle for Shop ID: {SHOP_ID}")
     
-    # 🌟 NEW: Session Warmup Handshake
-    # If our session pool is empty, we visit the public store page HTML first to collect cookies naturally
     if not session.cookies:
         logging.info("Session cookies empty. Performing public landing page warm-up...")
         try:
@@ -145,7 +152,6 @@ def monitor_store_cycle(session):
             time.sleep(random.randint(2, 4))
         except Exception as warmup_err:
             logging.error(f"Session onboarding warmup failed: {warmup_err}")
-            # Continue anyway and attempt the API stream path
     
     limit = 30
     offset = 0
@@ -162,9 +168,10 @@ def monitor_store_cycle(session):
             )
 
             try:
+                # Injected dynamic session header resolution logic here
                 response = session.get(
                     api_url, 
-                    headers=get_guest_headers(), 
+                    headers=get_guest_headers(session), 
                     impersonate="chrome124", 
                     timeout=15
                 )
