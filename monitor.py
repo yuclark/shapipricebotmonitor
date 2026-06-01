@@ -28,7 +28,6 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-# Verify Telegram pipelines are properly initialized
 if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
     logging.critical("CRITICAL: Telegram environment credentials missing from .env file!")
     raise SystemExit(1)
@@ -52,10 +51,9 @@ def init_db():
     logging.info("Database initialized successfully.")
 
 # ==============================================================================
-# 3. UTILITIES & ANONYMOUS HEADERS
+# 3. UTILITIES & GUEST HEADERS
 # ==============================================================================
 def get_guest_headers():
-    """Generates standard unauthenticated headers mimicking a clean guest browser session."""
     return {
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",
@@ -130,10 +128,24 @@ def process_product(cursor, item_id: int, name: str, price: int, stock: int):
         )
 
 # ==============================================================================
-# 5. CORE MONITOR CYCLE (PUBLIC SEARCH ROUTE)
+# 5. CORE MONITOR CYCLE (WITH AUTOMATED SESSION WARMING)
 # ==============================================================================
 def monitor_store_cycle(session):
     logging.info(f"Starting store scraping cycle for Shop ID: {SHOP_ID}")
+    
+    # 🌟 NEW: Session Warmup Handshake
+    # If our session pool is empty, we visit the public store page HTML first to collect cookies naturally
+    if not session.cookies:
+        logging.info("Session cookies empty. Performing public landing page warm-up...")
+        try:
+            shop_front_url = f"{BASE_URL}/shop/{SHOP_ID}"
+            warmup_response = session.get(shop_front_url, impersonate="chrome124", timeout=15)
+            warmup_response.raise_for_status()
+            logging.info("Successfully acquired anonymous guest tracking cookies.")
+            time.sleep(random.randint(2, 4))
+        except Exception as warmup_err:
+            logging.error(f"Session onboarding warmup failed: {warmup_err}")
+            # Continue anyway and attempt the API stream path
     
     limit = 30
     offset = 0
@@ -143,7 +155,6 @@ def monitor_store_cycle(session):
         cursor = conn.cursor()
 
         while has_more_items:
-            # Realigned target to the public endpoints utilizing basic numerical offsets
             api_url = (
                 f"https://shopee.ph/api/v4/search/search_items?by=pop&limit={limit}"
                 f"&match_id={SHOP_ID}&newest={offset}&order=desc&page_type=shop"
@@ -171,9 +182,7 @@ def monitor_store_cycle(session):
                     break
 
                 for item in items:
-                    # Public search structures wrap key attributes inside an item_basic block
                     ib = item.get("item_basic", item) if item.get("item_basic") else item
-                    
                     if ib.get("itemid"):
                         process_product(
                             cursor=cursor,
