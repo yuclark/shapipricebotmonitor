@@ -51,10 +51,9 @@ def init_db():
     logging.info("Database initialized successfully.")
 
 # ==============================================================================
-# 3. UTILITIES & DYNAMIC HEADERS
+# 3. UTILITIES & GUEST HEADERS
 # ==============================================================================
 def get_guest_headers(session):
-    """Generates standard headers matching the active session's cookie state."""
     headers = {
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",
@@ -63,7 +62,6 @@ def get_guest_headers(session):
         "X-API-Source": "pc"
     }
     
-    # 🔑 CRITICAL FIX: Dynamically extract the live token dropped by the landing page warm-up
     csrf_token = session.cookies.get("csrftoken")
     if csrf_token:
         headers["X-CSRFToken"] = csrf_token
@@ -71,7 +69,7 @@ def get_guest_headers(session):
     return headers
 
 def format_price(raw_price: int) -> str:
-    return f"₱{raw_price / 100000:,.2f}"
+    return f"₱{raw_price / 100000:,.2f}"Prefix
 
 # ==============================================================================
 # 4. ALERTS
@@ -137,7 +135,7 @@ def process_product(cursor, item_id: int, name: str, price: int, stock: int):
         )
 
 # ==============================================================================
-# 5. CORE MONITOR CYCLE
+# 5. CORE MONITOR CYCLE (PUBLIC STOREFRONT TABS ROUTE)
 # ==============================================================================
 def monitor_store_cycle(session):
     logging.info(f"Starting store scraping cycle for Shop ID: {SHOP_ID}")
@@ -161,14 +159,10 @@ def monitor_store_cycle(session):
         cursor = conn.cursor()
 
         while has_more_items:
-            api_url = (
-                f"https://shopee.ph/api/v4/search/search_items?by=pop&limit={limit}"
-                f"&match_id={SHOP_ID}&newest={offset}&order=desc&page_type=shop"
-                f"&scenario=PAGE_SHOP&version=2"
-            )
+            # PIVOT: Querying the web crawler-accessible GET layout endpoint 
+            api_url = f"{BASE_URL}/api/v4/shop/get_shop_tab?limit={limit}&offset={offset}&shopid={SHOP_ID}&tab_type=0"
 
             try:
-                # Injected dynamic session header resolution logic here
                 response = session.get(
                     api_url, 
                     headers=get_guest_headers(session), 
@@ -177,39 +171,49 @@ def monitor_store_cycle(session):
                 )
                 
                 if response.status_code == 403:
-                    logging.error("403 Forbidden: Guest handshake rejected by firewall layers.")
+                    logging.error("403 Forbidden: Public storefront route rejected by firewall layers.")
                     break
                 
                 response.raise_for_status()
                 data = response.json()
                 
-                items = data.get("data", {}).get("items", [])
-                if not items or items is None:
-                    logging.info("No more catalog items discovered. Ending cycle.")
+                modules = data.get("data", {}).get("modules", [])
+                if not modules:
+                    logging.info("No active display modules discovered on storefront. Ending cycle.")
                     break
 
-                for item in items:
-                    ib = item.get("item_basic", item) if item.get("item_basic") else item
-                    if ib.get("itemid"):
-                        process_product(
-                            cursor=cursor,
-                            item_id=ib.get("itemid"),
-                            name=ib.get("name"),
-                            price=ib.get("price"),
-                            stock=ib.get("stock")
-                        )
+                items_processed_in_page = 0
+                for module in modules:
+                    # Look inside both custom product grids and generalized carousel widgets
+                    module_data = module.get("data", {})
+                    items = module_data.get("items", []) if isinstance(module_data, dict) else []
+                    
+                    if items:
+                        for item in items:
+                            # Re-map structurally nested product dictionary references safely
+                            ib = item.get("item_basic", item) if item.get("item_basic") else item
+                            if ib.get("itemid"):
+                                process_product(
+                                    cursor=cursor,
+                                    item_id=ib.get("itemid"),
+                                    name=ib.get("name"),
+                                    price=ib.get("price"),
+                                    stock=ib.get("stock")
+                                )
+                                items_processed_in_page += 1
 
                 conn.commit()
-                logging.info(f"Successfully processed items offset range: {offset} -> {offset + len(items)}")
+                logging.info(f"Successfully processed items range offset: {offset} -> {offset + items_processed_in_page}")
                 
-                if len(items) < limit:
+                # If no products were returned inside the modules, we have reached the end of the collection catalog
+                if items_processed_in_page == 0:
                     has_more_items = False
                 else:
                     offset += limit
                     time.sleep(random.randint(4, 8))
 
             except Exception as req_err:
-                logging.error(f"Error handling public search catalog stream: {req_err}")
+                logging.error(f"Error handling public storefront catalog stream: {req_err}")
                 break  
 
 # ==============================================================================
