@@ -5,21 +5,19 @@ import sqlite3
 import logging
 from datetime import datetime
 from curl_cffi import requests
-# Injected dependency loader
 from dotenv import load_dotenv
 
-# Initialize tracking environment configuration parameters
+# Initialize local environment configurations
 load_dotenv()
 
 # ==============================================================================
-# 1. ENV CONFIGURATION STRINGS
+# 1. CONFIGURATION
 # ==============================================================================
 SHOP_ID = 41735247               # Feralde Perfume Store ID
 CHECK_INTERVAL_MINUTES = 15      # Frequency of store checking cycles
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-SHOPEE_COOKIE = os.getenv("SHOPEE_COOKIE")
 
 DB_FILE = "shopee_monitor.db"
 BASE_URL = "https://shopee.ph"
@@ -30,9 +28,9 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-# Core sanity check to prevent empty runtimes if .env layout is unreadable
-if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, SHOPEE_COOKIE]):
-    logging.critical("CRITICAL: Environment configs could not load completely from .env file!")
+# Verify Telegram pipelines are properly initialized
+if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
+    logging.critical("CRITICAL: Telegram environment credentials missing from .env file!")
     raise SystemExit(1)
 
 # ==============================================================================
@@ -54,17 +52,15 @@ def init_db():
     logging.info("Database initialized successfully.")
 
 # ==============================================================================
-# 3. UTILITIES & HEADERS
+# 3. UTILITIES & ANONYMOUS HEADERS
 # ==============================================================================
-def get_authenticated_headers():
+def get_guest_headers():
+    """Generates standard unauthenticated headers mimicking a clean guest browser session."""
     return {
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",
-        "Content-Type": "application/json",
-        "Cookie": SHOPEE_COOKIE,
-        "X-CSRFToken": "brjV2HDKwsqzs0zgUxyQ8nYbQlrTzDAv",
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": f"{BASE_URL}/shop/{SHOP_ID}"
+        "Referer": f"{BASE_URL}/shop/{SHOP_ID}",
+        "X-Requested-With": "XMLHttpRequest"
     }
 
 def format_price(raw_price: int) -> str:
@@ -134,58 +130,71 @@ def process_product(cursor, item_id: int, name: str, price: int, stock: int):
         )
 
 # ==============================================================================
-# 5. CORE MONITOR CYCLE
+# 5. CORE MONITOR CYCLE (PUBLIC SEARCH ROUTE)
 # ==============================================================================
 def monitor_store_cycle(session):
     logging.info(f"Starting store scraping cycle for Shop ID: {SHOP_ID}")
     
-    api_url = f"https://shopee.ph/api/v4/shop/get_shop_tab"
-    json_payload = {"shopid": SHOP_ID, "tab_type": 0, "limit": 30, "offset": 0}
+    limit = 30
+    offset = 0
+    has_more_items = True
 
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
 
-        try:
-            response = session.post(
-                api_url, 
-                headers=get_authenticated_headers(), 
-                json=json_payload,
-                impersonate="chrome124", 
-                timeout=15
+        while has_more_items:
+            # Realigned target to the public endpoints utilizing basic numerical offsets
+            api_url = (
+                f"https://shopee.ph/api/v4/search/search_items?by=pop&limit={limit}"
+                f"&match_id={SHOP_ID}&newest={offset}&order=desc&page_type=shop"
+                f"&scenario=PAGE_SHOP&version=2"
             )
-            
-            if response.status_code == 403:
-                logging.error("403 Forbidden: Cookie missing, invalid, or expired.")
-                return
-            
-            response.raise_for_status()
-            data = response.json()
-            
-            sections = data.get("data", {}).get("modules", [])
-            items_found = False
 
-            for module in sections:
-                if module.get("type") == "product_list" or "items" in module.get("data", {}):
-                    items = module.get("data", {}).get("items", [])
-                    if items:
-                        items_found = True
-                        for item in items:
-                            process_product(
-                                cursor=cursor,
-                                item_id=item.get("itemid"),
-                                name=item.get("name"),
-                                price=item.get("price"),
-                                stock=item.get("stock")
-                            )
-            
-            if items_found:
+            try:
+                response = session.get(
+                    api_url, 
+                    headers=get_guest_headers(), 
+                    impersonate="chrome124", 
+                    timeout=15
+                )
+                
+                if response.status_code == 403:
+                    logging.error("403 Forbidden: Guest handshake rejected by firewall layers.")
+                    break
+                
+                response.raise_for_status()
+                data = response.json()
+                
+                items = data.get("data", {}).get("items", [])
+                if not items or items is None:
+                    logging.info("No more catalog items discovered. Ending cycle.")
+                    break
+
+                for item in items:
+                    # Public search structures wrap key attributes inside an item_basic block
+                    ib = item.get("item_basic", item) if item.get("item_basic") else item
+                    
+                    if ib.get("itemid"):
+                        process_product(
+                            cursor=cursor,
+                            item_id=ib.get("itemid"),
+                            name=ib.get("name"),
+                            price=ib.get("price"),
+                            stock=ib.get("stock")
+                        )
+
                 conn.commit()
-                logging.info("Successfully synchronized storefront catalog items.")
-            else:
-                logging.warning("No clear product modules mapped in this shop configuration tab layout.")
+                logging.info(f"Successfully processed items offset range: {offset} -> {offset + len(items)}")
+                
+                if len(items) < limit:
+                    has_more_items = False
+                else:
+                    offset += limit
+                    time.sleep(random.randint(4, 8))
 
-        except Exception as req_err:
-            logging.error(f"Error handling API storefront data profile stream: {req_err}")
+            except Exception as req_err:
+                logging.error(f"Error handling public search catalog stream: {req_err}")
+                break  
 
 # ==============================================================================
 # 6. ENTRYPOINT
