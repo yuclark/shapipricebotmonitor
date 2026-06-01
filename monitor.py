@@ -69,7 +69,7 @@ def get_guest_headers(session):
     return headers
 
 def format_price(raw_price: int) -> str:
-    return f"₱{raw_price / 100000:,.2f}"Prefix
+    return f"₱{raw_price / 100000:,.2f}"
 
 # ==============================================================================
 # 4. ALERTS
